@@ -4,8 +4,17 @@ if (window.__igWipeInstalled) {
   window.__igWipeInstalled = true;
 
   (() => {
-    const CIRCLE_PREFIX =
-      'mask-image: url("https://i.instagram.com/static/images/bloks/icons/generated/circle__outline';
+    // Labels are matched case-insensitively against the UI text (English + Danish).
+    const LABELS = {
+      select:  ["Select", "Vælg"],
+      delete:  ["Delete", "Slet"],
+      unlike:  ["Unlike", "Synes ikke godt om", "Synes ikke længere godt om", "Fjern synes godt om"],
+      ok:      ["OK"],
+      empty:   ["No results", "Ingen resultater"],
+      emptyPrefix: ["You haven't", "Du har ikke"],
+    };
+    const UNCHECKED_SEL = '[style*="circle__outline"]';
+    const CHECKED_SEL = '[style*="circle-check__filled"]';
 
     let stopRequested = false;
     let running = false;
@@ -17,10 +26,72 @@ if (window.__igWipeInstalled) {
 
     function scriptClick(el) {
       if (!el || !el.isConnected) return;
+      const opts = { bubbles: true, cancelable: true, composed: true, view: window };
       try {
-        el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new PointerEvent("pointerdown", opts));
+        el.dispatchEvent(new MouseEvent("mousedown", opts));
+        el.dispatchEvent(new PointerEvent("pointerup", opts));
+        el.dispatchEvent(new MouseEvent("mouseup", opts));
+        el.dispatchEvent(new MouseEvent("click", opts));
       } catch { /* ignore */ }
-      try { el.click(); } catch { /* ignore */ }
+    }
+
+    const norm = (t) => (t || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    // Deepest elements whose own text equals one of the labels.
+    function findByText(labels, root = document.body, prefix = false) {
+      const wanted = labels.map(norm);
+      const out = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const t = norm(node.nodeValue);
+        if (!t) continue;
+        const hit = prefix ? wanted.some((w) => t.startsWith(w)) : wanted.includes(t);
+        if (hit && node.parentElement) out.push(node.parentElement);
+      }
+      return out;
+    }
+
+    // Nearest ancestor that actually receives clicks (bloks sets pointer-events: none on most layers).
+    function clickTarget(el) {
+      for (let n = el; n && n !== document.body; n = n.parentElement) {
+        if (n.tagName === "BUTTON") return n;
+        const pe = n.style?.pointerEvents;
+        if (n.getAttribute("role") === "button" && pe !== "none") return n;
+        if (pe === "auto" || n.style?.cursor === "pointer") return n;
+      }
+      return el;
+    }
+
+    function isEmptyState() {
+      return findByText(LABELS.empty).length > 0 ||
+        findByText(LABELS.emptyPrefix, document.body, true).length > 0;
+    }
+
+    function uncheckedBoxes() {
+      const boxes = Array.from(
+        document.querySelectorAll('[data-testid="bulk_action_checkbox"]')
+      ).filter((b) => b.querySelector(UNCHECKED_SEL));
+      if (boxes.length) return boxes;
+      // fallback: bare outline-circle icons (older layout / other activity pages)
+      return Array.from(document.querySelectorAll(UNCHECKED_SEL));
+    }
+
+    function isChecked(box) {
+      return box.matches(CHECKED_SEL) || Boolean(box.querySelector(CHECKED_SEL)) ||
+        (!box.matches(UNCHECKED_SEL) && !box.querySelector(UNCHECKED_SEL));
+    }
+
+    async function toggleBox(box) {
+      // Try the tile (the element with pointer-events: auto), then the checkbox itself.
+      const candidates = [clickTarget(box), box.querySelector('[role="button"]'), box];
+      for (const c of candidates) {
+        if (!c) continue;
+        scriptClick(c);
+        await sleep(350);
+        if (!box.isConnected || isChecked(box)) return true;
+      }
+      return false;
     }
 
     async function isStopped() {
@@ -54,38 +125,25 @@ if (window.__igWipeInstalled) {
     async function runDeletion(mode, batchSize) {
       running = true;
       const n = Math.min(50, Math.max(1, Number(batchSize) || 20));
-      const deleteText = mode === "likes" ? "Unlike" : "Delete";
+      const actionLabels = mode === "likes" ? LABELS.unlike : LABELS.delete;
 
       try {
         while (!(await isStopped())) {
 
-          // Step 1 — wait for and click "Select"
-          let clickedSelect = false;
-          while (!clickedSelect && !(await isStopped())) {
+          // Step 1 — wait for and click "Select" (skip if already in select mode)
+          let inSelectMode = false;
+          while (!inSelectMode && !(await isStopped())) {
             await sleep(2000);
-            const spans = Array.from(
-              document.querySelectorAll('span[data-bloks-name="bk.components.Text"]')
-            );
-            for (const el of spans) {
-              const t = (el.textContent || "").trim();
-              if (t === "Select") {
-                const done = spans.some(
-                  (j) =>
-                    (j.textContent || "").trim() === "No results" ||
-                    (j.textContent || "").trim().startsWith("You haven't")
-                );
-                if (done) {
-                  await chrome.storage.session.set({ igWipeStop: true });
-                  return;
-                }
-                scriptClick(el);
-                clickedSelect = true;
-                break;
-              }
-              if (t.startsWith("You haven't")) {
-                await chrome.storage.session.set({ igWipeStop: true });
-                return;
-              }
+            if (isEmptyState()) {
+              await chrome.storage.session.set({ igWipeStop: true });
+              return;
+            }
+            const [selectBtn] = findByText(LABELS.select);
+            if (selectBtn) {
+              scriptClick(clickTarget(selectBtn));
+              inSelectMode = true;
+            } else if (uncheckedBoxes().length) {
+              inSelectMode = true;
             }
           }
 
@@ -93,19 +151,12 @@ if (window.__igWipeInstalled) {
 
           // Step 2 — select up to n items
           let selectedCount = 0;
-          while (selectedCount === 0 && !(await isStopped())) {
+          for (let attempt = 0; selectedCount === 0 && attempt < 10 && !(await isStopped()); attempt++) {
             await sleep(1000);
-            const icons = document.querySelectorAll(
-              'div[data-bloks-name="ig.components.Icon"]'
-            );
-            for (const icon of icons) {
-              const style = icon.getAttribute("style") || "";
-              if (style.startsWith(CIRCLE_PREFIX)) {
-                scriptClick(icon);
-                selectedCount++;
-                await sleep(300);
-                if (selectedCount >= n) break;
-              }
+            for (const box of uncheckedBoxes()) {
+              if (await isStopped()) return;
+              if (await toggleBox(box)) selectedCount++;
+              if (selectedCount >= n) break;
             }
           }
 
@@ -117,45 +168,35 @@ if (window.__igWipeInstalled) {
           }
 
           // Step 3 — click Delete / Unlike
-          let deleteClicked = false;
           await sleep(1000);
-          for (const span of document.querySelectorAll(
-            'span[data-bloks-name="bk.components.TextSpan"]'
-          )) {
-            if ((span.textContent || "").trim() === deleteText) {
-              scriptClick(span);
-              deleteClicked = true;
-              break;
-            }
-          }
+          const [actionBtn] = findByText(actionLabels).filter(
+            (el) => !el.closest('[role="dialog"]')
+          );
 
-          if (!deleteClicked) {
+          if (!actionBtn) {
             // button not found — reload and retry
             await sleep(2000);
             location.reload();
             await sleep(3000);
             continue;
           }
+          scriptClick(clickTarget(actionBtn));
 
           // Step 4 — confirm dialog
           let confirmed = false;
-          while (!confirmed && !(await isStopped())) {
+          for (let attempt = 0; !confirmed && attempt < 15 && !(await isStopped()); attempt++) {
             await sleep(1000);
-            for (const btn of document.querySelectorAll('div[role="dialog"] button')) {
-              let btnText = "";
-              try {
-                const inner = btn.querySelector("div");
-                btnText = inner ? (inner.textContent || "").trim() : "";
-              } catch { continue; }
-
-              if (btnText === deleteText) {
-                scriptClick(btn);
+            for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+              const [confirmBtn] = findByText(actionLabels, dialog);
+              if (confirmBtn) {
+                scriptClick(clickTarget(confirmBtn));
                 confirmed = true;
                 break;
               }
-              if (btnText === "OK") {
+              const [okBtn] = findByText(LABELS.ok, dialog);
+              if (okBtn) {
                 // rate-limited — dismiss and reload
-                scriptClick(btn);
+                scriptClick(clickTarget(okBtn));
                 await sleep(2000);
                 location.reload();
                 await sleep(3000);
@@ -163,6 +204,11 @@ if (window.__igWipeInstalled) {
                 break;
               }
             }
+          }
+          if (!confirmed) {
+            location.reload();
+            await sleep(3000);
+            continue;
           }
 
           if (await isStopped()) return;
