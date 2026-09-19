@@ -158,18 +158,39 @@ if (window.__igWipeInstalled) {
 
     // ── Step helpers ───────────────────────────────────────────────────────────
 
-    // "Select" candidates, best first: the previously verified text, then blue
-    // text, then right-most. Only buttons above the content are considered.
+    // Outlined/filled chips ("Sort & filter" etc.) are real buttons; the Select
+    // control is bare link-style text.
+    function hasButtonChrome(el) {
+      const cs = getComputedStyle(el);
+      const border = parseFloat(cs.borderTopWidth) > 0 && cs.borderTopStyle !== "none";
+      const bg = cs.backgroundColor.match(/[\d.]+/g);
+      const filled = bg && (bg.length < 4 || Number(bg[3]) > 0);
+      return border || filled;
+    }
+
+    // "Select" candidates, best first. Only link-style text above the content is
+    // considered, and when any of it is blue (Instagram's link color) only the blue
+    // ones are, so other header controls are never clicked when Select exists.
     function selectCandidates() {
       const firstItem = document.querySelector('img[src*="cdninstagram"]');
       const limit = firstItem ? firstItem.getBoundingClientRect().top : Infinity;
-      const score = (c) =>
-        (c.text === learnedSelectText ? 1e6 : 0) +
-        (isBlue(c.leaf) ? 1e5 : 0) +
-        c.target.getBoundingClientRect().right;
-      return textButtons()
-        .filter((c) => c.target.getBoundingClientRect().bottom <= limit + 1)
-        .sort((a, b) => score(b) - score(a));
+      let cands = textButtons().filter((c) =>
+        c.target.getBoundingClientRect().bottom <= limit + 1 && !hasButtonChrome(c.target));
+      const learned = cands.filter((c) => c.text === learnedSelectText);
+      if (learned.length) return learned;
+      const blue = cands.filter((c) => isBlue(c.leaf));
+      if (blue.length) cands = blue;
+      return cands.sort((x, y) =>
+        y.target.getBoundingClientRect().right - x.target.getBoundingClientRect().right);
+    }
+
+    // Close sheets/dialogs opened by a mis-click: click their X icon, then Escape.
+    async function closeOverlays() {
+      for (const x of document.querySelectorAll('[style*="x-pano__outline"], [style*="x__outline"]')) {
+        if (isVisible(x)) scriptClick(clickTarget(x) || x);
+      }
+      pressEscape();
+      await sleep(800);
     }
 
     // Returns "ok" when select mode is active, "empty" when nothing can be selected.
@@ -184,6 +205,7 @@ if (window.__igWipeInstalled) {
         const cand = selectCandidates().find((c) => !tried.has(c.text));
         if (!cand) continue;
         tried.add(cand.text);
+        const confident = cand.text === learnedSelectText || isBlue(cand.leaf);
 
         scriptClick(cand.target);
         for (let i = 0; i < 6 && !inSelectMode(); i++) await sleep(500);
@@ -197,13 +219,9 @@ if (window.__igWipeInstalled) {
           learnedSelectText = cand.text;
           return "ok";
         }
-        // wrong button (e.g. opened a sort sheet) — close whatever opened
-        if (openDialogs().length) {
-          pressEscape();
-          await sleep(800);
-        }
-        // Select button that works but shows no checkboxes means there is nothing left
-        if (cand.text === learnedSelectText) return "empty";
+        if (!confident) await closeOverlays(); // guessed wrong, e.g. opened a sheet
+        // The Select button worked but showed no checkboxes: nothing left to delete
+        if (confident) return "empty";
       }
       return "empty";
     }
