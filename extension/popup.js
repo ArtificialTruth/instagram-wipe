@@ -23,17 +23,46 @@ async function focusedTabId() {
   return tab?.id ?? null;
 }
 
-function selectedMode() {
-  return (document.querySelector('input[name="mode"]:checked') || {}).value || "likes";
+const modeInputs = Array.from(document.querySelectorAll('input[name="mode"]'));
+
+const MODE_NAMES = {
+  story_replies: "story replies",
+  comments:      "comments",
+  likes:         "likes",
+  reels:         "reels",
+  posts:         "posts",
+};
+
+function selectedModes() {
+  return modeInputs.filter((i) => i.checked).map((i) => i.value);
+}
+
+function queueStatus(queue) {
+  if (!queue?.modes?.length) return "Running — check the Instagram tab.";
+  const name = MODE_NAMES[queue.modes[queue.index]] || queue.modes[queue.index];
+  const step = queue.modes.length > 1 ? ` (${queue.index + 1}/${queue.modes.length})` : "";
+  return `Running — deleting ${name}${step}. Check the Instagram tab.`;
+}
+
+// Remember the chosen categories between popup openings
+chrome.storage.local.get("igWipeModes").then(({ igWipeModes }) => {
+  if (Array.isArray(igWipeModes)) {
+    for (const i of modeInputs) i.checked = igWipeModes.includes(i.value);
+  }
+}).catch(() => {});
+for (const i of modeInputs) {
+  i.addEventListener("change", () => {
+    chrome.storage.local.set({ igWipeModes: selectedModes() }).catch(() => {});
+  });
 }
 
 // ── Restore state when popup reopens ─────────────────────────────────────────
 (async () => {
   try {
-    const { igWipeRunning } = await chrome.storage.session.get("igWipeRunning");
+    const { igWipeRunning, igWipeQueue } = await chrome.storage.session.get(["igWipeRunning", "igWipeQueue"]);
     if (igWipeRunning) {
       setRunning(true);
-      setStatus("Running — check the Instagram tab.", "ok");
+      setStatus(queueStatus(igWipeQueue), "ok");
     }
   } catch { /* ignore */ }
 })();
@@ -41,6 +70,9 @@ function selectedMode() {
 // ── Watch for the loop finishing on its own ───────────────────────────────────
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "session") return;
+  if (changes.igWipeQueue?.newValue && !btnStop.disabled) {
+    setStatus(queueStatus(changes.igWipeQueue.newValue), "ok");
+  }
   if ("igWipeRunning" in changes && !changes.igWipeRunning.newValue) {
     setRunning(false);
     // Only update status if it currently says "Running"
@@ -62,18 +94,23 @@ btnStart.addEventListener("click", async () => {
     return;
   }
 
-  const mode      = selectedMode();
+  const modes     = selectedModes();
+  if (!modes.length) {
+    setStatus("Pick at least one category.", "err");
+    setRunning(false);
+    return;
+  }
   const batchSize = Math.min(50, Math.max(1, parseInt(document.getElementById("batchSize").value, 10) || 20));
 
   await chrome.storage.session.set({ igWipeStop: false, igWipeRunning: true });
 
   try {
-    const rsp = await chrome.runtime.sendMessage({ type: "START_DELETION", tabId, mode, batchSize });
+    const rsp = await chrome.runtime.sendMessage({ type: "START_DELETION", tabId, modes, batchSize });
     if (rsp?.ok) {
       setStatus(
         rsp.navigated
           ? "Navigating to Your Activity… deletion will start automatically."
-          : "Running — check the Instagram tab.",
+          : queueStatus({ modes, index: 0 }),
         "ok"
       );
     } else {

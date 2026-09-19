@@ -5,6 +5,8 @@ A Chrome extension that bulk-deletes your Instagram activity. Instagram makes ma
 ## Features
 
 - Delete **Story Replies**, **Comments**, **Likes**, **Reels**, and **Posts** in bulk
+- Pick several categories at once — they are wiped one after another
+- Works in any Instagram language (no hardcoded UI text)
 - Configurable batch size (1–50 items per batch)
 - Start / Stop controls with live status feedback
 - Runs entirely client-side — no server, no API keys, no account credentials
@@ -24,18 +26,18 @@ The extension is not on the Chrome Web Store. Load it as an unpacked extension:
 1. Log into [instagram.com](https://instagram.com) in a regular tab.
 2. Keep that Instagram tab focused (active).
 3. Click the **Instagram Wipe** toolbar icon to open the popup.
-4. Select the category you want to delete (Story Replies, Comments, Likes, Reels, or Posts).
+4. Tick the categories you want to delete (Story Replies, Comments, Likes, Reels, Posts) — one or several.
 5. Set **Items per batch** (default 20; max 50).
 6. Click **Start**.
 
-The extension navigates the Instagram tab to the relevant *Your Activity* page and begins selecting and deleting items automatically. Click **Stop** at any time to halt the process. The extension handles rate-limit dialogs and page reloads gracefully and will stop automatically when no more items are found.
+The extension navigates the Instagram tab to the relevant *Your Activity* page and begins selecting and deleting items automatically. Click **Stop** at any time to halt the process. The extension handles rate-limit dialogs and page reloads gracefully and moves on to the next selected category when the current one is empty, stopping once all are done.
 
 ## How It Works
 
 | File | Role |
 |---|---|
 | `manifest.json` | Manifest V3 config; declares permissions and the content script match pattern |
-| `background.js` | Service worker; handles navigation to the correct activity URL and relays start/stop messages |
+| `background.js` | Service worker; queues the selected categories, navigates to each activity URL and relays start/stop messages |
 | `content.js` | Injected into `instagram.com/your_activity/*`; performs the actual DOM interaction loop |
 | `popup.html/js/css` | Extension popup UI |
 
@@ -45,7 +47,7 @@ The deletion loop in `content.js` follows five steps per batch:
 2. Click up to *batchSize* item checkboxes.
 3. Click the **Delete** / **Unlike** action button.
 4. Confirm the dialog (or dismiss a rate-limit notice and reload).
-5. Pause briefly, then repeat.
+5. Pause briefly, then repeat until the page shows its empty state, then continue with the next category.
 
 ## Permissions
 

@@ -81,7 +81,7 @@ fieldset label:hover {
   color: #fff;
 }
 
-fieldset input[type="radio"] {
+fieldset input[type="checkbox"] {
   accent-color: #e1306c;
   width: 14px;
   height: 14px;

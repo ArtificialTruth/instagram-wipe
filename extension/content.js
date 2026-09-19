@@ -10,6 +10,8 @@ if (window.__igWipeInstalled) {
     const UNCHECKED_SEL = '[style*="circle__outline"]';
     const CHECKED_SEL = '[style*="circle-check__filled"]';
     const ICON_SEL = 'img, svg, [style*="mask-image"]';
+    // Big "!" icon Instagram shows in the empty state ("No results").
+    const EMPTY_ICON_SEL = '[style*="error__outline"]';
 
     let stopRequested = false;
     let running = false;
@@ -115,6 +117,25 @@ if (window.__igWipeInstalled) {
 
     const inSelectMode = () => checkboxes().length > 0;
 
+    function looksEmpty() {
+      const icon = document.querySelector(EMPTY_ICON_SEL);
+      return Boolean(icon && isVisible(icon)) && !inSelectMode();
+    }
+
+    // Empty state must persist briefly so a loading/transition frame isn't mistaken for it.
+    async function isEmptyState() {
+      if (!looksEmpty()) return false;
+      await sleep(1500);
+      return looksEmpty();
+    }
+
+    // Tell the background this category is finished so it can move to the next one.
+    async function finishMode() {
+      try {
+        await chrome.runtime.sendMessage({ type: "MODE_DONE", mode: currentJob?.mode });
+      } catch { /* ignore */ }
+    }
+
     const uncheckedBoxes = () =>
       checkboxes().filter((b) => b.matches(UNCHECKED_SEL) || b.querySelector(UNCHECKED_SEL));
 
@@ -158,6 +179,7 @@ if (window.__igWipeInstalled) {
         if (await isStopped()) return "stopped";
         await sleep(2000);
         if (inSelectMode()) return "ok";
+        if (await isEmptyState()) return "empty";
 
         const cand = selectCandidates().find((c) => !tried.has(c.text));
         if (!cand) continue;
@@ -249,7 +271,9 @@ if (window.__igWipeInstalled) {
           return true;
         }
         currentJob = { mode: msg.mode, batchSize: msg.batchSize, tabId: msg.tabId };
-        runDeletion(msg.batchSize).catch(() => {});
+        runDeletion(msg.batchSize).catch(() => {
+          chrome.runtime.sendMessage({ type: "RUN_FAILED" }).catch(() => {});
+        });
         sendResponse({ ok: true });
         return true;
       }
@@ -268,7 +292,7 @@ if (window.__igWipeInstalled) {
           const state = await enterSelectMode(startUrl);
           if (state === "stopped") return;
           if (state === "empty") {
-            await chrome.storage.session.set({ igWipeStop: true });
+            await finishMode();
             return;
           }
 
@@ -286,7 +310,7 @@ if (window.__igWipeInstalled) {
           if (await isStopped()) return;
 
           if (selectedCount === 0) {
-            await chrome.storage.session.set({ igWipeStop: true });
+            await finishMode();
             return;
           }
 
@@ -316,11 +340,8 @@ if (window.__igWipeInstalled) {
           await sleep(3000);
         }
       } finally {
+        // igWipeRunning is owned by the background (it spans several categories)
         running = false;
-        try {
-          const { igWipePending } = await chrome.storage.session.get("igWipePending");
-          if (!igWipePending) await chrome.storage.session.set({ igWipeRunning: false });
-        } catch { /* ignore */ }
       }
     }
   })();

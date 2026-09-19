@@ -66,12 +66,56 @@ async function sendToContent(tabId, payload) {
   return false;
 }
 
+// ── Queue ──────────────────────────────────────────────────────────────────────
+// igWipeQueue = { modes: [...], index, batchSize, tabId } lives in session storage
+// so it survives the service worker being suspended between categories.
+
+async function finishAll() {
+  await chrome.storage.session.set({
+    igWipeStop: true, igWipeRunning: false, igWipePending: null, igWipeQueue: null,
+  });
+}
+
+// Start (or navigate to) the category at queue.index.
+async function startCurrent(queue) {
+  const { tabId, batchSize } = queue;
+  const mode = queue.modes[queue.index];
+  await chrome.storage.session.set({ igWipeStop: false, igWipePending: null, igWipeQueue: queue });
+
+  let tab;
+  try { tab = await chrome.tabs.get(tabId); } catch {
+    await finishAll();
+    return { ok: false, error: "That tab no longer exists." };
+  }
+
+  if (tabIsOnTarget(tab.url || "", mode)) {
+    // Already on the right page — try to send directly
+    const ok = await sendToContent(tabId, { type: "START_DELETION", mode, batchSize, tabId });
+    if (!ok) {
+      // Content script not ready; store pending and reload
+      await chrome.storage.session.set({ igWipePending: { mode, batchSize, tabId } });
+      try { await chrome.tabs.reload(tabId); } catch { /* ignore */ }
+    }
+    return { ok: true, navigated: false };
+  }
+
+  // Navigate to the activity page and wait for it to load (handled by onUpdated)
+  await chrome.storage.session.set({ igWipePending: { mode, batchSize, tabId } });
+  try {
+    await chrome.tabs.update(tabId, { url: activityUrl(mode) });
+  } catch (e) {
+    await finishAll();
+    return { ok: false, error: (e?.message) || "Could not navigate the tab." };
+  }
+  return { ok: true, navigated: true };
+}
+
 // ── Message handler ───────────────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendRsp) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendRsp) => {
   if (msg?.type === "STOP_DELETION") {
     (async () => {
-      await chrome.storage.session.set({ igWipeStop: true, igWipeRunning: false, igWipePending: null });
+      await finishAll();
       const tabId = await resolveTab(msg.tabId);
       if (tabId != null) {
         try { await chrome.tabs.sendMessage(tabId, { type: "STOP_DELETION" }); } catch { /* ignore */ }
@@ -81,54 +125,63 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendRsp) => {
     return true;
   }
 
+  // Content script finished the current category (nothing left) — move on.
+  if (msg?.type === "MODE_DONE") {
+    (async () => {
+      const { igWipeQueue: queue, igWipeStop } = await chrome.storage.session.get(["igWipeQueue", "igWipeStop"]);
+      if (!queue || igWipeStop || queue.modes[queue.index] !== msg.mode) return;
+      if (sender.tab?.id != null && sender.tab.id !== queue.tabId) return;
+      if (queue.index + 1 >= queue.modes.length) {
+        await finishAll();
+        return;
+      }
+      await startCurrent({ ...queue, index: queue.index + 1 });
+    })();
+    return;
+  }
+
+  if (msg?.type === "RUN_FAILED") {
+    finishAll();
+    return;
+  }
+
   if (msg?.type !== "START_DELETION") return;
 
-  const { mode, batchSize, tabId: rawTabId } = msg;
+  const { batchSize, tabId: rawTabId } = msg;
+  const modes = (Array.isArray(msg.modes) ? msg.modes : [msg.mode])
+    .filter((m) => m in ACTIVITY_URLS);
 
   (async () => {
+    if (!modes.length) {
+      sendRsp({ ok: false, error: "Pick at least one category." });
+      return;
+    }
     await chrome.storage.session.set({ igWipeStop: false, igWipePending: null, igWipeRunning: true });
 
     const tabId = await resolveTab(rawTabId);
     if (tabId == null) {
+      await finishAll();
       sendRsp({ ok: false, error: "No tab found. Focus the Instagram tab then open the popup again." });
       return;
     }
 
     let tab;
     try { tab = await chrome.tabs.get(tabId); } catch {
+      await finishAll();
       sendRsp({ ok: false, error: "That tab no longer exists." });
       return;
     }
 
     const url = tab.url || "";
     if (url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url.startsWith("about:")) {
+      await finishAll();
       sendRsp({ ok: false, error: "Open instagram.com in a regular tab first, then click Start." });
       return;
     }
 
-    if (tabIsOnTarget(url, mode)) {
-      // Already on the right page — try to send directly
-      const ok = await sendToContent(tabId, { type: "START_DELETION", mode, batchSize, tabId });
-      if (!ok) {
-        // Content script not ready; store pending and reload
-        await chrome.storage.session.set({ igWipePending: { mode, batchSize, tabId } });
-        try { await chrome.tabs.reload(tabId); } catch { /* ignore */ }
-      }
-      try { await chrome.tabs.update(tabId, { active: true }); } catch { /* ignore */ }
-      sendRsp({ ok: true, navigated: false });
-      return;
-    }
-
-    // Navigate to the activity page and wait for it to load (handled by onUpdated)
-    await chrome.storage.session.set({ igWipePending: { mode, batchSize, tabId } });
-    try {
-      await chrome.tabs.update(tabId, { url: activityUrl(mode), active: true });
-    } catch (e) {
-      await chrome.storage.session.remove("igWipePending");
-      sendRsp({ ok: false, error: (e?.message) || "Could not navigate the tab." });
-      return;
-    }
-    sendRsp({ ok: true, navigated: true });
+    const rsp = await startCurrent({ modes, index: 0, batchSize, tabId });
+    try { await chrome.tabs.update(tabId, { active: true }); } catch { /* ignore */ }
+    sendRsp(rsp);
   })();
 
   return true;
