@@ -10,8 +10,15 @@ if (window.__igWipeInstalled) {
     const UNCHECKED_SEL = '[style*="circle__outline"]';
     const CHECKED_SEL = '[style*="circle-check__filled"]';
     const ICON_SEL = 'img, svg, [style*="mask-image"]';
-    // Big "!" icon Instagram shows in the empty state ("No results").
-    const EMPTY_ICON_SEL = '[style*="error__outline"]';
+    // Empty-state markers: the "!" icon (filtered lists, e.g. likes), the error
+    // illustration and the *_container_empty_state test id (e.g. comments).
+    // Note likes wraps its empty state in "liked_container_non_empty_state",
+    // which the $= match deliberately does not cover.
+    const EMPTY_SEL = [
+      '[style*="error__outline"]',
+      'img[src*="ig_illustrations/illo_error"]',
+      '[data-testid$="container_empty_state"]',
+    ].join(", ");
 
     let stopRequested = false;
     let running = false;
@@ -118,8 +125,8 @@ if (window.__igWipeInstalled) {
     const inSelectMode = () => checkboxes().length > 0;
 
     function looksEmpty() {
-      const icon = document.querySelector(EMPTY_ICON_SEL);
-      return Boolean(icon && isVisible(icon)) && !inSelectMode();
+      const marker = Array.from(document.querySelectorAll(EMPTY_SEL)).some(isVisible);
+      return marker && !inSelectMode();
     }
 
     // Empty state must persist briefly so a loading/transition frame isn't mistaken for it.
