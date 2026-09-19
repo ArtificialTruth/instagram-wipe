@@ -1,6 +1,6 @@
 # Privacy Policy — Instagram Wipe
 
-**Last updated: April 9, 2026**
+**Last updated: September 19, 2026**
 
 ## Overview
 
@@ -24,11 +24,17 @@ All processing happens entirely inside your own browser tab. The extension injec
 
 ## Local Storage
 
-The extension uses Chrome's `session` storage solely to pass transient start/stop signals between the popup, background service worker, and content script. This data:
+The extension uses Chrome's extension storage for two narrow purposes. Neither contains any personal information or Instagram content, and neither is ever read by, or transmitted to, any external party.
 
-- Consists only of small boolean/object flags (`igWipeStop`, `igWipeRunning`, `igWipePending`).
-- Is scoped to the current browser session and is cleared when the browser is closed.
-- Is never read by, or transmitted to, any external party.
+**Session storage** passes transient signals between the popup, background service worker, and content script:
+
+- Small flags and settings only: `igWipeStop`, `igWipeRunning`, `igWipePending`, and `igWipeQueue` (the categories you chose, the batch size, and the ID of the browser tab being worked on).
+- Scoped to the current browser session and cleared when the browser is closed.
+
+**Local storage** remembers your preferences between popup openings:
+
+- A single setting, `igWipeModes`: the list of categories you last ticked (e.g. `["likes", "comments"]`).
+- Stays on your device until you uninstall the extension or clear its data.
 
 ## Third-Party Sharing
 

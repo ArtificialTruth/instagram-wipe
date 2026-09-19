@@ -53,10 +53,9 @@ The deletion loop in `content.js` follows five steps per batch:
 
 | Permission | Why it's needed |
 |---|---|
-| `tabs` | Navigate the Instagram tab to the correct activity page |
 | `scripting` | Inject `content.js` when the declarative content script hasn't loaded yet |
-| `storage` | Pass stop/start signals between the popup, background, and content script via `session` storage |
-| `host_permissions` → `instagram.com` | Required to run content scripts and send messages to Instagram tabs |
+| `storage` | Pass start/stop signals and the category queue between the popup, background, and content script via `session` storage, and remember your ticked categories via `local` storage |
+| `host_permissions` → `instagram.com` | Required to run content scripts, send messages to Instagram tabs, and navigate them between activity pages |
 
 ## Notes
 

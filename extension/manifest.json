@@ -1,15 +1,21 @@
 {
   "manifest_version": 3,
   "name": "Instagram Wipe",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Bulk-delete story replies, comments, likes, reels, and posts from Instagram Your Activity.",
-  "permissions": ["storage", "scripting", "tabs"],
+  "permissions": ["storage", "scripting"],
   "host_permissions": ["https://www.instagram.com/*"],
+  "icons": {
+    "128": "icon.png"
+  },
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_popup": "popup.html",
+    "default_icon": {
+      "128": "icon.png"
+    },
     "default_title": "Instagram Wipe"
   },
   "content_scripts": [

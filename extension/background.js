@@ -165,20 +165,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendRsp) => {
       return;
     }
 
-    let tab;
-    try { tab = await chrome.tabs.get(tabId); } catch {
-      await finishAll();
-      sendRsp({ ok: false, error: "That tab no longer exists." });
-      return;
-    }
-
-    const url = tab.url || "";
-    if (url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url.startsWith("about:")) {
-      await finishAll();
-      sendRsp({ ok: false, error: "Open instagram.com in a regular tab first, then click Start." });
-      return;
-    }
-
     const rsp = await startCurrent({ modes, index: 0, batchSize, tabId });
     try { await chrome.tabs.update(tabId, { active: true }); } catch { /* ignore */ }
     sendRsp(rsp);
