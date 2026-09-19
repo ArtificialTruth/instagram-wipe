@@ -59,10 +59,13 @@ for (const i of modeInputs) {
 // ── Restore state when popup reopens ─────────────────────────────────────────
 (async () => {
   try {
-    const { igWipeRunning, igWipeQueue } = await chrome.storage.session.get(["igWipeRunning", "igWipeQueue"]);
+    const { igWipeRunning, igWipeQueue, igWipeError } =
+      await chrome.storage.session.get(["igWipeRunning", "igWipeQueue", "igWipeError"]);
     if (igWipeRunning) {
       setRunning(true);
       setStatus(queueStatus(igWipeQueue), "ok");
+    } else if (igWipeError) {
+      setStatus(igWipeError, "err");
     }
   } catch { /* ignore */ }
 })();
@@ -70,6 +73,11 @@ for (const i of modeInputs) {
 // ── Watch for the loop finishing on its own ───────────────────────────────────
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "session") return;
+  if (changes.igWipeError?.newValue) {
+    setRunning(false);
+    setStatus(changes.igWipeError.newValue, "err");
+    return;
+  }
   if (changes.igWipeQueue?.newValue && !btnStop.disabled) {
     setStatus(queueStatus(changes.igWipeQueue.newValue), "ok");
   }

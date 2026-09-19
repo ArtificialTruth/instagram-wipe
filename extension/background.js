@@ -70,10 +70,24 @@ async function sendToContent(tabId, payload) {
 // igWipeQueue = { modes: [...], index, batchSize, tabId } lives in session storage
 // so it survives the service worker being suspended between categories.
 
-async function finishAll() {
+// `error` is shown by the popup (e.g. when Instagram asks the user to log in).
+async function finishAll(error = null) {
   await chrome.storage.session.set({
     igWipeStop: true, igWipeRunning: false, igWipePending: null, igWipeQueue: null,
+    igWipeError: error,
   });
+}
+
+const LOGIN_ERROR = "You're not logged into Instagram. Log in in that tab, then click Start again.";
+
+// Instagram redirects logged-out visitors to /accounts/login/?next=...
+function isLoginUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname.endsWith("instagram.com") && u.pathname.startsWith("/accounts/login");
+  } catch {
+    return false;
+  }
 }
 
 // Start (or navigate to) the category at queue.index.
@@ -156,7 +170,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendRsp) => {
       sendRsp({ ok: false, error: "Pick at least one category." });
       return;
     }
-    await chrome.storage.session.set({ igWipeStop: false, igWipePending: null, igWipeRunning: true });
+    await chrome.storage.session.set({ igWipeStop: false, igWipePending: null, igWipeRunning: true, igWipeError: null });
 
     const tabId = await resolveTab(rawTabId);
     if (tabId == null) {
@@ -176,14 +190,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendRsp) => {
 // ── Pick up pending start after navigation completes ─────────────────────────
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status !== "complete" || !tab.url) return;
+  // changeInfo.url also catches Instagram's client-side redirect to the login page
+  const loginRedirect = isLoginUrl(changeInfo.url || "");
+  if (!loginRedirect && (changeInfo.status !== "complete" || !tab.url)) return;
 
   (async () => {
     const { igWipePending } = await chrome.storage.session.get("igWipePending");
     if (!igWipePending) return;
 
     const pendingTabId = Number(igWipePending.tabId) | 0;
-    if (pendingTabId !== tabId || !tabReachedTarget(tab.url, igWipePending.mode)) return;
+    if (pendingTabId !== tabId) return;
+
+    if (loginRedirect || isLoginUrl(tab.url)) {
+      await finishAll(LOGIN_ERROR);
+      return;
+    }
+    if (!tabReachedTarget(tab.url, igWipePending.mode)) return;
 
     await chrome.storage.session.remove("igWipePending");
     await chrome.storage.session.set({ igWipeStop: false });
