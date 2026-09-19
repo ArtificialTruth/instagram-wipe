@@ -71,7 +71,7 @@ async function sendToContent(tabId, payload) {
 chrome.runtime.onMessage.addListener((msg, _sender, sendRsp) => {
   if (msg?.type === "STOP_DELETION") {
     (async () => {
-      await chrome.storage.session.set({ igWipeStop: true, igWipeRunning: false });
+      await chrome.storage.session.set({ igWipeStop: true, igWipeRunning: false, igWipePending: null });
       const tabId = await resolveTab(msg.tabId);
       if (tabId != null) {
         try { await chrome.tabs.sendMessage(tabId, { type: "STOP_DELETION" }); } catch { /* ignore */ }
@@ -108,7 +108,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendRsp) => {
 
     if (tabIsOnTarget(url, mode)) {
       // Already on the right page — try to send directly
-      const ok = await sendToContent(tabId, { type: "START_DELETION", mode, batchSize });
+      const ok = await sendToContent(tabId, { type: "START_DELETION", mode, batchSize, tabId });
       if (!ok) {
         // Content script not ready; store pending and reload
         await chrome.storage.session.set({ igWipePending: { mode, batchSize, tabId } });
@@ -149,7 +149,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     await chrome.storage.session.remove("igWipePending");
     await chrome.storage.session.set({ igWipeStop: false });
 
-    const payload = { type: "START_DELETION", mode: igWipePending.mode, batchSize: igWipePending.batchSize };
+    const payload = { type: "START_DELETION", mode: igWipePending.mode, batchSize: igWipePending.batchSize, tabId };
     const ok = await sendToContent(tabId, payload);
     if (!ok) {
       // Last-resort retry after a short delay

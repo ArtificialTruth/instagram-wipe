@@ -4,20 +4,17 @@ if (window.__igWipeInstalled) {
   window.__igWipeInstalled = true;
 
   (() => {
-    // Labels are matched case-insensitively against the UI text (English + Danish).
-    const LABELS = {
-      select:  ["Select", "Vælg"],
-      delete:  ["Delete", "Slet"],
-      unlike:  ["Unlike", "Synes ikke godt om", "Synes ikke længere godt om", "Fjern synes godt om"],
-      ok:      ["OK"],
-      empty:   ["No results", "Ingen resultater"],
-      emptyPrefix: ["You haven't", "Du har ikke"],
-    };
+    // Everything here is language-independent: elements are identified by
+    // test ids, icon URLs, colors, position and by observing what a click does.
+    const CHECKBOX_SEL = '[data-testid="bulk_action_checkbox"]';
     const UNCHECKED_SEL = '[style*="circle__outline"]';
     const CHECKED_SEL = '[style*="circle-check__filled"]';
+    const ICON_SEL = 'img, svg, [style*="mask-image"]';
 
     let stopRequested = false;
     let running = false;
+    // Text of the verified "Select" button, learned at runtime (in whatever language the UI uses).
+    let learnedSelectText = null;
 
     function sleep(ms) {
       const jittered = Math.round(ms * (0.85 + Math.random() * 0.3));
@@ -36,21 +33,38 @@ if (window.__igWipeInstalled) {
       } catch { /* ignore */ }
     }
 
-    const norm = (t) => (t || "").replace(/\s+/g, " ").trim().toLowerCase();
-
-    // Deepest elements whose own text equals one of the labels.
-    function findByText(labels, root = document.body, prefix = false) {
-      const wanted = labels.map(norm);
-      const out = [];
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        const t = norm(node.nodeValue);
-        if (!t) continue;
-        const hit = prefix ? wanted.some((w) => t.startsWith(w)) : wanted.includes(t);
-        if (hit && node.parentElement) out.push(node.parentElement);
-      }
-      return out;
+    function pressEscape() {
+      const opts = { key: "Escape", code: "Escape", keyCode: 27, bubbles: true };
+      document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", opts));
+      document.dispatchEvent(new KeyboardEvent("keydown", opts));
     }
+
+    async function isStopped() {
+      if (stopRequested) return true;
+      try {
+        const { igWipeStop } = await chrome.storage.session.get("igWipeStop");
+        return Boolean(igWipeStop);
+      } catch {
+        return false;
+      }
+    }
+
+    // ── DOM helpers ─────────────────────────────────────────────────────────────
+
+    const norm = (t) => (t || "").replace(/\s+/g, " ").trim();
+
+    function isVisible(el) {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+
+    function rgb(el) {
+      const m = getComputedStyle(el).color.match(/\d+(\.\d+)?/g);
+      return m ? m.slice(0, 3).map(Number) : [0, 0, 0];
+    }
+    // Instagram renders destructive actions (Delete / Unlike) in red and links (Select) in blue.
+    const isRed = (el) => { const [r, g, b] = rgb(el); return r > 180 && g < 110 && b < 130; };
+    const isBlue = (el) => { const [r, g, b] = rgb(el); return b > 200 && r < 90 && g > 80; };
 
     // Nearest ancestor that actually receives clicks (bloks sets pointer-events: none on most layers).
     function clickTarget(el) {
@@ -60,22 +74,49 @@ if (window.__igWipeInstalled) {
         if (n.getAttribute("role") === "button" && pe !== "none") return n;
         if (pe === "auto" || n.style?.cursor === "pointer") return n;
       }
-      return el;
+      return getComputedStyle(el).cursor === "pointer" ? el : null;
     }
 
-    function isEmptyState() {
-      return findByText(LABELS.empty).length > 0 ||
-        findByText(LABELS.emptyPrefix, document.body, true).length > 0;
+    const inTile = (el) =>
+      Boolean(el.closest('[role="button"]')?.querySelector(CHECKBOX_SEL)) ||
+      Boolean(el.closest(CHECKBOX_SEL));
+
+    // Clickable, icon-free text buttons outside dialogs, nav links and item tiles.
+    // Returns [{ leaf, target, text }].
+    function textButtons(root = document.body) {
+      const seen = new Set();
+      const out = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = norm(node.nodeValue);
+        const leaf = node.parentElement;
+        if (!text || !leaf || text.length > 40 || !isVisible(leaf)) continue;
+        const target = clickTarget(leaf);
+        if (!target || seen.has(target)) continue;
+        seen.add(target);
+        if (norm(target.textContent) !== text) continue; // text must be the button's only label
+        if (target.querySelector(ICON_SEL)) continue;
+        if (root === document.body && target.closest('[role="dialog"], a[href], nav')) continue;
+        if (inTile(target)) continue;
+        out.push({ leaf, target, text });
+      }
+      return out;
     }
 
-    function uncheckedBoxes() {
-      const boxes = Array.from(
-        document.querySelectorAll('[data-testid="bulk_action_checkbox"]')
-      ).filter((b) => b.querySelector(UNCHECKED_SEL));
+    const openDialogs = () =>
+      Array.from(document.querySelectorAll('[role="dialog"]')).filter(isVisible);
+
+    function checkboxes() {
+      const boxes = Array.from(document.querySelectorAll(CHECKBOX_SEL));
       if (boxes.length) return boxes;
-      // fallback: bare outline-circle icons (older layout / other activity pages)
+      // fallback: bare outline-circle icons (other activity page layouts)
       return Array.from(document.querySelectorAll(UNCHECKED_SEL));
     }
+
+    const inSelectMode = () => checkboxes().length > 0;
+
+    const uncheckedBoxes = () =>
+      checkboxes().filter((b) => b.matches(UNCHECKED_SEL) || b.querySelector(UNCHECKED_SEL));
 
     function isChecked(box) {
       return box.matches(CHECKED_SEL) || Boolean(box.querySelector(CHECKED_SEL)) ||
@@ -94,15 +135,106 @@ if (window.__igWipeInstalled) {
       return false;
     }
 
-    async function isStopped() {
-      if (stopRequested) return true;
-      try {
-        const { igWipeStop } = await chrome.storage.session.get("igWipeStop");
-        return Boolean(igWipeStop);
-      } catch {
-        return false;
-      }
+    // ── Step helpers ───────────────────────────────────────────────────────────
+
+    // "Select" candidates, best first: the previously verified text, then blue
+    // text, then right-most. Only buttons above the content are considered.
+    function selectCandidates() {
+      const firstItem = document.querySelector('img[src*="cdninstagram"]');
+      const limit = firstItem ? firstItem.getBoundingClientRect().top : Infinity;
+      const score = (c) =>
+        (c.text === learnedSelectText ? 1e6 : 0) +
+        (isBlue(c.leaf) ? 1e5 : 0) +
+        c.target.getBoundingClientRect().right;
+      return textButtons()
+        .filter((c) => c.target.getBoundingClientRect().bottom <= limit + 1)
+        .sort((a, b) => score(b) - score(a));
     }
+
+    // Returns "ok" when select mode is active, "empty" when nothing can be selected.
+    async function enterSelectMode(startUrl) {
+      const tried = new Set();
+      for (let attempt = 0; attempt < 15; attempt++) {
+        if (await isStopped()) return "stopped";
+        await sleep(2000);
+        if (inSelectMode()) return "ok";
+
+        const cand = selectCandidates().find((c) => !tried.has(c.text));
+        if (!cand) continue;
+        tried.add(cand.text);
+
+        scriptClick(cand.target);
+        for (let i = 0; i < 6 && !inSelectMode(); i++) await sleep(500);
+
+        if (location.href !== startUrl) {
+          // wrong button navigated away — go back to the activity page
+          await reloadAndResume(startUrl);
+          return "stopped";
+        }
+        if (inSelectMode()) {
+          learnedSelectText = cand.text;
+          return "ok";
+        }
+        // wrong button (e.g. opened a sort sheet) — close whatever opened
+        if (openDialogs().length) {
+          pressEscape();
+          await sleep(800);
+        }
+        // Select button that works but shows no checkboxes means there is nothing left
+        if (cand.text === learnedSelectText) return "empty";
+      }
+      return "empty";
+    }
+
+    // Delete / Unlike button in the bulk action bar. Instagram renders it in red;
+    // failing that, take the right-most button in the bottom-most row of buttons
+    // that appeared with select mode (the destructive action sits on the right,
+    // e.g. "Archive | Delete").
+    function findActionButton(before) {
+      const buttons = textButtons();
+      const red = buttons.filter((c) => isRed(c.leaf));
+      if (red.length) return red[red.length - 1].target;
+      const fresh = buttons
+        .filter((c) => !before.has(c.target))
+        .map((c) => ({ el: c.target, r: c.target.getBoundingClientRect() }));
+      if (!fresh.length) return null;
+      const lowest = Math.max(...fresh.map((f) => f.r.top));
+      const row = fresh.filter((f) => Math.abs(f.r.top - lowest) < 20);
+      row.sort((x, y) => y.r.right - x.r.right);
+      return row[0].el;
+    }
+
+    // Handles the dialog shown after the action button. Returns "confirmed",
+    // "dismissed" (e.g. rate-limit notice) or null if no dialog yet.
+    function handleDialog() {
+      for (const dialog of openDialogs()) {
+        const btns = Array.from(dialog.querySelectorAll('button, [role="button"]'))
+          .filter((b) => isVisible(b) && norm(b.textContent));
+        if (!btns.length) continue;
+        const redBtn = btns.find((b) => {
+          const leaf = Array.from(b.querySelectorAll("*")).find((e) => norm(e.textContent) && !e.children.length) || b;
+          return isRed(leaf) || isRed(b);
+        });
+        if (redBtn) { scriptClick(redBtn); return "confirmed"; }
+        if (btns.length === 1) { scriptClick(btns[0]); return "dismissed"; }
+        // confirmation dialogs list the destructive action first, cancel last
+        scriptClick(btns[0]);
+        return "confirmed";
+      }
+      return null;
+    }
+
+    async function reloadAndResume(url) {
+      try {
+        await chrome.storage.session.set({ igWipePending: { ...currentJob, resume: true } });
+      } catch { /* ignore */ }
+      await sleep(1000);
+      if (url && location.href !== url) location.href = url;
+      else location.reload();
+      await sleep(5000);
+    }
+
+    let currentJob = null;
 
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (msg?.type === "STOP_DELETION") {
@@ -116,38 +248,29 @@ if (window.__igWipeInstalled) {
           sendResponse({ ok: true, note: "already_running" });
           return true;
         }
-        runDeletion(msg.mode, msg.batchSize).catch(() => {});
+        currentJob = { mode: msg.mode, batchSize: msg.batchSize, tabId: msg.tabId };
+        runDeletion(msg.batchSize).catch(() => {});
         sendResponse({ ok: true });
         return true;
       }
     });
 
-    async function runDeletion(mode, batchSize) {
+    async function runDeletion(batchSize) {
       running = true;
       const n = Math.min(50, Math.max(1, Number(batchSize) || 20));
-      const actionLabels = mode === "likes" ? LABELS.unlike : LABELS.delete;
+      const startUrl = location.href;
 
       try {
         while (!(await isStopped())) {
 
-          // Step 1 — wait for and click "Select" (skip if already in select mode)
-          let inSelectMode = false;
-          while (!inSelectMode && !(await isStopped())) {
-            await sleep(2000);
-            if (isEmptyState()) {
-              await chrome.storage.session.set({ igWipeStop: true });
-              return;
-            }
-            const [selectBtn] = findByText(LABELS.select);
-            if (selectBtn) {
-              scriptClick(clickTarget(selectBtn));
-              inSelectMode = true;
-            } else if (uncheckedBoxes().length) {
-              inSelectMode = true;
-            }
+          // Step 1 — enter select mode
+          const before = new Set(textButtons().map((c) => c.target));
+          const state = await enterSelectMode(startUrl);
+          if (state === "stopped") return;
+          if (state === "empty") {
+            await chrome.storage.session.set({ igWipeStop: true });
+            return;
           }
-
-          if (await isStopped()) return;
 
           // Step 2 — select up to n items
           let selectedCount = 0;
@@ -169,49 +292,25 @@ if (window.__igWipeInstalled) {
 
           // Step 3 — click Delete / Unlike
           await sleep(1000);
-          const [actionBtn] = findByText(actionLabels).filter(
-            (el) => !el.closest('[role="dialog"]')
-          );
-
-          if (!actionBtn) {
-            // button not found — reload and retry
-            await sleep(2000);
-            location.reload();
-            await sleep(3000);
-            continue;
+          const actionBtn = findActionButton(before);
+          if (!actionBtn || location.href !== startUrl) {
+            await reloadAndResume(startUrl);
+            return;
           }
-          scriptClick(clickTarget(actionBtn));
+          scriptClick(actionBtn);
 
           // Step 4 — confirm dialog
-          let confirmed = false;
-          for (let attempt = 0; !confirmed && attempt < 15 && !(await isStopped()); attempt++) {
+          let result = null;
+          for (let attempt = 0; !result && attempt < 15 && !(await isStopped()); attempt++) {
             await sleep(1000);
-            for (const dialog of document.querySelectorAll('[role="dialog"]')) {
-              const [confirmBtn] = findByText(actionLabels, dialog);
-              if (confirmBtn) {
-                scriptClick(clickTarget(confirmBtn));
-                confirmed = true;
-                break;
-              }
-              const [okBtn] = findByText(LABELS.ok, dialog);
-              if (okBtn) {
-                // rate-limited — dismiss and reload
-                scriptClick(clickTarget(okBtn));
-                await sleep(2000);
-                location.reload();
-                await sleep(3000);
-                confirmed = true;
-                break;
-              }
-            }
+            result = handleDialog();
           }
-          if (!confirmed) {
-            location.reload();
-            await sleep(3000);
-            continue;
-          }
-
           if (await isStopped()) return;
+          if (result !== "confirmed") {
+            // rate-limited or no dialog — reload and carry on
+            await reloadAndResume(startUrl);
+            return;
+          }
 
           // Step 5 — brief pause before the next batch
           await sleep(3000);
@@ -219,7 +318,8 @@ if (window.__igWipeInstalled) {
       } finally {
         running = false;
         try {
-          await chrome.storage.session.set({ igWipeRunning: false });
+          const { igWipePending } = await chrome.storage.session.get("igWipePending");
+          if (!igWipePending) await chrome.storage.session.set({ igWipeRunning: false });
         } catch { /* ignore */ }
       }
     }
